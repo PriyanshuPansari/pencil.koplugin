@@ -556,8 +556,13 @@ function Pencil:addRawPoint(x, y)
     local n = #self.current_stroke.points
 
     local width = self.current_stroke.width
-    local color = Screen.night_mode and self.current_stroke.color:invert() or self.current_stroke.color
+    local color = self.current_stroke.color
     local half_w = math.floor(width / 2) + 2  -- padding for antialiasing
+
+    -- Reinvert color in night mode (if it's not black)
+    if Screen.night_mode and self.current_stroke.color_name ~= "Black" then
+        color = color:invert()
+    end
 
     -- Draw to framebuffer and track dirty region
     local dirty_x, dirty_y, dirty_w, dirty_h
@@ -1455,11 +1460,16 @@ function ColorPickerWidget:init()
             margin = 0,
             bordersize = border_size,
             color = border_color,
-            background = Screen.night_mode and color_info.color:invert() or color_info.color,
+            background = color_info.color,
             WidgetContainer:new{
                 dimen = Geom:new{ w = button_size - border_size * 2, h = button_size - border_size * 2 },
             },
         }
+
+        -- Reinvert color in night mode (if it's not black)
+        if Screen.night_mode and color_info.name ~= "Black" then
+            color_swatch.background = color_swatch.background:invert()
+        end
 
         -- Wrap in InputContainer to handle taps
         local color_button = InputContainer:new{
@@ -2428,7 +2438,9 @@ function Pencil:renderStroke(bb, stroke)
 
     -- Get color directly (it's already a Blitbuffer color)
     local color = stroke.color or self.tool_settings[tool].color or Blitbuffer.COLOR_BLACK
-    if Screen.night_mode then
+
+    -- Reinvert color in night mode (if it's not black)
+    if Screen.night_mode and stroke.color_name ~= "Black" then
         color = color:invert()
     end
 
