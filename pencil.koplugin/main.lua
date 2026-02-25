@@ -556,7 +556,7 @@ function Pencil:addRawPoint(x, y)
     local n = #self.current_stroke.points
 
     local width = self.current_stroke.width
-    local color = self.current_stroke.color
+    local color = Screen.night_mode and self.current_stroke.color:invert() or self.current_stroke.color
     local half_w = math.floor(width / 2) + 2  -- padding for antialiasing
 
     -- Draw to framebuffer and track dirty region
@@ -1455,7 +1455,7 @@ function ColorPickerWidget:init()
             margin = 0,
             bordersize = border_size,
             color = border_color,
-            background = color_info.color,
+            background = Screen.night_mode and color_info.color:invert() or color_info.color,
             WidgetContainer:new{
                 dimen = Geom:new{ w = button_size - border_size * 2, h = button_size - border_size * 2 },
             },
@@ -2428,6 +2428,9 @@ function Pencil:renderStroke(bb, stroke)
 
     -- Get color directly (it's already a Blitbuffer color)
     local color = stroke.color or self.tool_settings[tool].color or Blitbuffer.COLOR_BLACK
+    if Screen.night_mode then
+        color = color:invert()
+    end
 
     -- Highlighter uses lighter color
     local is_highlighter = (tool == TOOL_HIGHLIGHTER)
