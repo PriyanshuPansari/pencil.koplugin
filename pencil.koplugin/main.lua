@@ -820,9 +820,8 @@ function Pencil:getCurrentToolSettings()
     return self.tool_settings[self.current_tool] or self.tool_settings[TOOL_PEN]
 end
 
--- Check if plugin is enabled (global setting)
 function Pencil:isEnabled()
-    return G_reader_settings:isTrue("pencil_annotation_enabled")
+    return true
 end
 
 -- Set enabled state (global setting)
