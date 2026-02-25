@@ -1708,6 +1708,12 @@ function Pencil:showColorPicker(x, y)
         current_color_name = self.tool_settings[TOOL_PEN].color_name,
         callback = function(color_value, color_name)
             plugin:setPenColor(color_value, color_name)
+
+            -- Display white as the color name if black is picked in night mode
+            if Screen.night_mode and color_name == "Black" then
+                color_name = "White"
+            end
+
             UIManager:show(InfoMessage:new{
                 text = T(_("Pen color: %1"), color_name),
                 timeout = 1,
