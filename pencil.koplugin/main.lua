@@ -559,6 +559,11 @@ function Pencil:addRawPoint(x, y)
     local color = self.current_stroke.color
     local half_w = math.floor(width / 2) + 2  -- padding for antialiasing
 
+    -- Reinvert color in night mode (if it's not black or gray)
+    if Screen.night_mode and self.current_stroke.color_name ~= "Black" and self.current_stroke.color_name ~= "Gray" then
+        color = color:invert()
+    end
+
     -- Draw to framebuffer and track dirty region
     local dirty_x, dirty_y, dirty_w, dirty_h
     if n == 1 then
@@ -1461,6 +1466,11 @@ function ColorPickerWidget:init()
             },
         }
 
+        -- Reinvert color in night mode (if it's not black or gray)
+        if Screen.night_mode and color_info.name ~= "Black" and color_info.name ~= "Gray" then
+            color_swatch.background = color_swatch.background:invert()
+        end
+
         -- Wrap in InputContainer to handle taps
         local color_button = InputContainer:new{
             dimen = Geom:new{ w = button_size, h = button_size },
@@ -1698,6 +1708,12 @@ function Pencil:showColorPicker(x, y)
         current_color_name = self.tool_settings[TOOL_PEN].color_name,
         callback = function(color_value, color_name)
             plugin:setPenColor(color_value, color_name)
+
+            -- Display white as the color name if black is picked in night mode
+            if Screen.night_mode and color_name == "Black" then
+                color_name = "White"
+            end
+
             UIManager:show(InfoMessage:new{
                 text = T(_("Pen color: %1"), color_name),
                 timeout = 1,
@@ -2428,6 +2444,11 @@ function Pencil:renderStroke(bb, stroke)
 
     -- Get color directly (it's already a Blitbuffer color)
     local color = stroke.color or self.tool_settings[tool].color or Blitbuffer.COLOR_BLACK
+
+    -- Reinvert color in night mode (if it's not black or gray)
+    if Screen.night_mode and stroke.color_name ~= "Black" and stroke.color_name ~= "Gray" then
+        color = color:invert()
+    end
 
     -- Highlighter uses lighter color
     local is_highlighter = (tool == TOOL_HIGHLIGHTER)
