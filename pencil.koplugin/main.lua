@@ -826,7 +826,7 @@ function Pencil:getCurrentToolSettings()
 end
 
 function Pencil:isEnabled()
-    return true
+    return G_reader_settings:readSetting("pencil_annotation_enabled") == true
 end
 
 -- Set enabled state (global setting)
@@ -839,6 +839,16 @@ function Pencil:addToMainMenu(menu_items)
         text = _("Pencil"),
         sorting_hint = "more_tools",
         sub_item_table = {
+            {
+                text = _("Enabled"),
+                checked_func = function()
+                    return self:isEnabled()
+                end,
+                callback = function()
+                    self:onPencilToggleEnabled()
+                end,
+                separator = true,
+            },
             {
                 text = _("Tool"),
                 help_text = _("Select pencil or eraser."),
