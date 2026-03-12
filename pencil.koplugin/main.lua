@@ -309,6 +309,9 @@ function Pencil:handleStylusSlot(input, slot)
             tostring(self.eraser_button_active)))
     end
 
+    -- Don't capture pen input when a menu or overlay is on top of the reader
+    if self:isOverlayActive() then return false end
+
     -- Detect eraser end via slot.tool BEFORE key events arrive
     -- This handles the timing issue where stylus callback fires before key events
     if slot.tool == TOOL_TYPE_ERASER and not self.eraser_button_active then
@@ -349,7 +352,7 @@ function Pencil:handleStylusSlot(input, slot)
         return true
     end
 
-    if not self:isEnabled() then return false end
+    if not self:isEnabled() or self:isOverlayActive() then return false end
 
     -- Log in debug mode
     if self.input_debug_mode then
@@ -829,6 +832,22 @@ function Pencil:isEnabled()
     return G_reader_settings:readSetting("pencil_annotation_enabled") == true
 end
 
+-- Check if a menu or overlay is shown on top of the reader view.
+-- When true, pen input should pass through so the overlay can handle it.
+function Pencil:isOverlayActive()
+    local stack = UIManager._window_stack
+    if not stack or #stack == 0 then return false end
+    local top = stack[#stack]
+    if top and top.widget then
+        local name = top.widget.name or top.widget.id
+        -- ReaderUI is the document view itself — anything else is an overlay
+        if name ~= "ReaderUI" then
+            return true
+        end
+    end
+    return false
+end
+
 -- Set enabled state (global setting)
 function Pencil:setEnabled(enabled)
     G_reader_settings:saveSetting("pencil_annotation_enabled", enabled)
@@ -1009,7 +1028,7 @@ end
 --   - Hold + drag = temporarily highlight, then return to original tool
 --   - Quick press (no drawing while held) = toggle between pen and eraser
 function Pencil:onStylusButtonPress()
-    if not self:isEnabled() then return false end
+    if not self:isEnabled() or self:isOverlayActive() then return false end
 
     self.side_button_down = true
     self.side_button_used_for_highlight = false
@@ -1020,7 +1039,7 @@ end
 
 -- Handle stylus button release (up event)
 function Pencil:onStylusButtonRelease()
-    if not self:isEnabled() then return false end
+    if not self:isEnabled() or self:isOverlayActive() then return false end
 
     local was_down = self.side_button_down
     self.side_button_down = false
@@ -1100,7 +1119,7 @@ function Pencil:onKeyPress(key)
         return true
     end
 
-    if not self:isEnabled() then return false end
+    if not self:isEnabled() or self:isOverlayActive() then return false end
 
     -- BTN_STYLUS (331) - side button on stylus (mapped to "Eraser" on Kobo)
     -- BTN_STYLUS2 (332) - second side button (mapped to "Highlighter" on Kobo)
@@ -1152,7 +1171,7 @@ function Pencil:onKeyRelease(key)
         return true
     end
 
-    if not self:isEnabled() then return false end
+    if not self:isEnabled() or self:isOverlayActive() then return false end
 
     -- Side button released
     if key_str:match("Highlighter") or key_str:match("Stylus") then
@@ -1319,7 +1338,7 @@ end
 
 -- Handle swipe gestures (block them when drawing mode is active)
 function Pencil:onDrawSwipe(ges)
-    if not self:isEnabled() then return false end
+    if not self:isEnabled() or self:isOverlayActive() then return false end
 
     -- If raw input detected pen, block swipe to prevent page turns
     if self.pen_down then return true end
@@ -1334,7 +1353,7 @@ end
 
 -- Handle tip long press (hold gesture)
 function Pencil:onDrawHold(ges)
-    if not self:isEnabled() then return false end
+    if not self:isEnabled() or self:isOverlayActive() then return false end
 
     -- If raw input detected pen, block hold to prevent reader highlight mode
     if self.pen_down then return true end
@@ -1765,7 +1784,7 @@ end
 -- NOTE: For pen/highlighter, raw input hook handles drawing directly for lowest latency
 -- This handler blocks gestures and is a backup if raw input not working
 function Pencil:onDrawTouch(ges)
-    if not self:isEnabled() then return false end
+    if not self:isEnabled() or self:isOverlayActive() then return false end
 
     -- Check if this is a finger touch (not pen) - let gesture system handle it
     local is_pen, _ = self:isPenInput(ges)
@@ -1942,7 +1961,7 @@ end
 
 -- Called on tap - create a dot or erase at point
 function Pencil:onDrawTap(ges)
-    if not self:isEnabled() then return false end
+    if not self:isEnabled() or self:isOverlayActive() then return false end
 
     -- If raw input detected pen recently, block tap to prevent navigation
     -- Note: pen_down will be false by tap time, but we may have just drawn
@@ -2014,7 +2033,7 @@ end
 -- NOTE: For pen/highlighter, raw input hook handles drawing directly for lowest latency
 -- This handler blocks gestures and handles eraser mode
 function Pencil:onDrawPan(ges)
-    if not self:isEnabled() then return false end
+    if not self:isEnabled() or self:isOverlayActive() then return false end
 
     -- Check if raw input hook detected pen - if so, block gesture
     -- Raw input handles all drawing; this just needs to block swipe/pan gestures
@@ -2107,7 +2126,7 @@ end
 -- Called when pan ends - finalize stroke
 -- NOTE: For pen/highlighter, raw input hook may have already finalized the stroke
 function Pencil:onDrawPanRelease(ges)
-    if not self:isEnabled() then return false end
+    if not self:isEnabled() or self:isOverlayActive() then return false end
 
     -- Let finger releases be handled by gesture system
     local is_pen, is_eraser_end = self:isPenInput(ges)
