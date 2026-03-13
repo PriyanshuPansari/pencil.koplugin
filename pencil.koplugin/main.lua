@@ -22,14 +22,11 @@ local InfoMessage = require("ui/widget/infomessage")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
-local json = require("json")
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local _ = require("gettext")
 local T = require("ffi/util").template
 local time = require("ui/time")
-local ffi = require("ffi")
-local C = ffi.C
 
 -- Check if device supports touch input
 if not Device:isTouchDevice() then
@@ -165,8 +162,8 @@ function Pencil:init()
         self:setupPenInput()
     end
 
-    -- Install input event hook for debugging (if debug mode enabled)
-    self:installInputDebugHook()
+    -- Initialize debug logging (if debug mode enabled)
+    self:initDebugLog()
 
     -- Register custom actions for gesture mapping
     Dispatcher:registerAction("pencil_toggle_tool", {
@@ -257,7 +254,7 @@ function Pencil:onPencilSelectEraser()
 end
 
 function Pencil:onPencilUndo()
-    self:undo()
+    self:undoLastStroke()
     return true
 end
 
@@ -693,94 +690,15 @@ function Pencil:clearDebugLog()
     end
 end
 
--- Install a hook to log raw input events (for debugging eraser detection)
-function Pencil:installInputDebugHook()
+-- Initialize debug logging (clear log and write header)
+function Pencil:initDebugLog()
     if not self.input_debug_mode then return end
-
-    -- Clear and start fresh log
     self:clearDebugLog()
-    self:writeDebugLog("Input debug hook being installed...")
-
+    self:writeDebugLog("Debug logging enabled")
     local Input = Device.input
-    if not Input then
-        self:writeDebugLog("ERROR: Device.input not available")
-        return
+    if Input then
+        self:writeDebugLog("Input.pen_slot = " .. tostring(Input.pen_slot or "nil"))
     end
-
-    -- Log device info
-    local pen_slot_str = tostring(Input.pen_slot or "nil")
-    self:writeDebugLog("Input.pen_slot = " .. pen_slot_str)
-
-    -- Event name lookup tables
-    local btn_names = {
-        [320] = "BTN_TOOL_PEN",
-        [321] = "BTN_TOOL_RUBBER",
-        [322] = "BTN_TOOL_BRUSH",
-        [323] = "BTN_TOOL_PENCIL",
-        [324] = "BTN_TOOL_AIRBRUSH",
-        [325] = "BTN_TOOL_FINGER",
-        [326] = "BTN_TOOL_MOUSE",
-        [327] = "BTN_TOOL_LENS",
-        [330] = "BTN_TOUCH",
-        [331] = "BTN_STYLUS",
-        [332] = "BTN_STYLUS2",
-    }
-
-    local abs_names = {
-        [0] = "ABS_X",
-        [1] = "ABS_Y",
-        [24] = "ABS_PRESSURE",
-        [25] = "ABS_DISTANCE",
-        [47] = "ABS_MT_SLOT",
-        [48] = "ABS_MT_TOUCH_MAJOR",
-        [49] = "ABS_MT_TOUCH_MINOR",
-        [53] = "ABS_MT_POSITION_X",
-        [54] = "ABS_MT_POSITION_Y",
-        [55] = "ABS_MT_TOOL_TYPE",
-        [57] = "ABS_MT_TRACKING_ID",
-        [58] = "ABS_MT_PRESSURE",
-    }
-
-    local tool_types = {
-        [0] = "FINGER",
-        [1] = "PEN",
-        [2] = "ERASER",
-    }
-
-    -- Hook into the main event handler to see ALL events
-    if not self._original_handleTouchEv and Input.handleTouchEv then
-        self._original_handleTouchEv = Input.handleTouchEv
-        local plugin = self
-        Input.handleTouchEv = function(input_self, ev)
-            local type_name = "UNK"
-            local code_name = tostring(ev.code)
-            local extra_info = ""
-
-            if ev.type == 0 then
-                type_name = "SYN"
-            elseif ev.type == 1 then
-                type_name = "KEY"
-                code_name = btn_names[ev.code] or tostring(ev.code)
-            elseif ev.type == 3 then
-                type_name = "ABS"
-                code_name = abs_names[ev.code] or tostring(ev.code)
-                if ev.code == 55 then
-                    extra_info = " -> " .. (tool_types[ev.value] or "?")
-                end
-            end
-
-            local msg = type_name .. " " .. code_name .. "=" .. tostring(ev.value) .. extra_info
-            plugin:writeDebugLog(msg)
-
-            return plugin._original_handleTouchEv(input_self, ev)
-        end
-        self:writeDebugLog("Touch hook installed")
-        logger.info("Pencil: Touch debug hook installed")
-    end
-
-    self:writeDebugLog("")
-    self:writeDebugLog("=== Ready - use pen tip and eraser end ===")
-    self:writeDebugLog("")
 end
 
 -- Load plugin settings
@@ -821,11 +739,6 @@ function Pencil:setTool(tool)
         text = T(_("Tool: %1"), display_name),
         timeout = 1,
     })
-end
-
--- Get current tool settings
-function Pencil:getCurrentToolSettings()
-    return self.tool_settings[self.current_tool] or self.tool_settings[TOOL_PEN]
 end
 
 function Pencil:isEnabled()
@@ -931,8 +844,8 @@ function Pencil:addToMainMenu(menu_items)
                     self.input_debug_mode = not self.input_debug_mode
                     self:saveSettings()
                     if self.input_debug_mode then
-                        -- Install the hook now that debug mode is enabled
-                        self:installInputDebugHook()
+                        -- Initialize debug logging
+                        self:initDebugLog()
                         UIManager:show(InfoMessage:new{
                             text = T(_("Input debug mode enabled.\n\nLog file: %1\n\nUse both pen tip and eraser end, then check the log."), self:getDebugLogPath()),
                         })
@@ -1849,99 +1762,28 @@ end
 -- Check if this is a stylus/pen event (not finger)
 -- Returns: is_pen (boolean), is_eraser_end (boolean)
 function Pencil:isPenInput(ges)
-    -- In emulator, treat all input as pen for testing
     if Device:isEmulator() then
         return true, false
     end
 
-    -- Check if the pen slot is currently active with tool type = pen or eraser
-    -- The pen slot is separate from finger slots (usually slot 4)
     local Input = Device.input
-    local is_pen = false
-    local is_eraser_end = false
+    if not Input or not Input.pen_slot then
+        return false, false
+    end
 
-    -- Tool types from Linux input subsystem:
-    -- TOOL_TYPE_FINGER = 0
-    -- TOOL_TYPE_PEN = 1
-    -- TOOL_TYPE_RUBBER/ERASER = 2
     local TOOL_TYPE_PEN = 1
     local TOOL_TYPE_ERASER = 2
 
-    if Input and Input.pen_slot then
-        local pen_slot_data = Input:getMtSlot(Input.pen_slot)
-        if pen_slot_data then
-            if self.input_debug_mode then
-                logger.info("Pencil: isPenInput check - pen_slot=", Input.pen_slot,
-                           "tool=", pen_slot_data.tool, "id=", pen_slot_data.id,
-                           "x=", pen_slot_data.x, "y=", pen_slot_data.y,
-                           "ges.pos=", ges.pos.x, ",", ges.pos.y)
-            else
-                logger.dbg("Pencil: isPenInput check - pen_slot=", Input.pen_slot,
-                           "tool=", pen_slot_data.tool, "id=", pen_slot_data.id,
-                           "x=", pen_slot_data.x, "y=", pen_slot_data.y)
-            end
-
-            -- Check if pen slot has tool type and is actively being tracked (id ~= -1)
-            if pen_slot_data.id and pen_slot_data.id ~= -1 then
-                if pen_slot_data.tool == TOOL_TYPE_PEN then
-                    is_pen = true
-                elseif pen_slot_data.tool == TOOL_TYPE_ERASER then
-                    is_pen = true
-                    is_eraser_end = true
-                    logger.dbg("Pencil: eraser end detected via pen_slot tool type")
-                end
-            end
-
-            -- Fallback: on some devices, the pen slot might have valid x/y even if id is reset
-            if not is_pen and pen_slot_data.x and pen_slot_data.y then
-                if pen_slot_data.tool == TOOL_TYPE_PEN or pen_slot_data.tool == TOOL_TYPE_ERASER then
-                    local dx = math.abs((pen_slot_data.x or 0) - (ges.pos.x or 0))
-                    local dy = math.abs((pen_slot_data.y or 0) - (ges.pos.y or 0))
-                    if dx < 50 and dy < 50 then
-                        logger.dbg("Pencil: isPenInput - pen slot matched by position")
-                        is_pen = true
-                        if pen_slot_data.tool == TOOL_TYPE_ERASER then
-                            is_eraser_end = true
-                        end
-                    end
-                end
-            end
+    local pen_slot_data = Input:getMtSlot(Input.pen_slot)
+    if pen_slot_data and pen_slot_data.id and pen_slot_data.id ~= -1 then
+        if pen_slot_data.tool == TOOL_TYPE_PEN then
+            return true, false
+        elseif pen_slot_data.tool == TOOL_TYPE_ERASER then
+            return true, true
         end
     end
 
-    -- Also check current slot for tool type (might be different on some devices)
-    if not is_pen and Input then
-        local cur_slot_data = Input:getCurrentMtSlot()
-        if cur_slot_data then
-            if self.input_debug_mode then
-                logger.info("Pencil: current slot data - slot=", Input.cur_slot,
-                           "tool=", cur_slot_data.tool, "id=", cur_slot_data.id)
-            end
-            if cur_slot_data.tool == TOOL_TYPE_PEN then
-                logger.dbg("Pencil: isPenInput - current slot has pen tool type")
-                is_pen = true
-            elseif cur_slot_data.tool == TOOL_TYPE_ERASER then
-                logger.dbg("Pencil: isPenInput - current slot has eraser tool type")
-                is_pen = true
-                is_eraser_end = true
-            end
-        end
-    end
-
-    -- Log all slots in debug mode to help diagnose issues
-    if self.input_debug_mode and Input and Input.ev_slots then
-        local slot_info = {}
-        for slot, data in pairs(Input.ev_slots) do
-            if data.id and data.id ~= -1 then
-                table.insert(slot_info, string.format("slot%d:tool=%s,id=%s", slot, tostring(data.tool), tostring(data.id)))
-            end
-        end
-        if #slot_info > 0 then
-            logger.info("Pencil: active slots:", table.concat(slot_info, " "))
-        end
-    end
-
-    return is_pen, is_eraser_end
+    return false, false
 end
 
 -- Get the effective tool (considers physical eraser end and side button)
@@ -2024,7 +1866,7 @@ function Pencil:onDrawTap(ges)
 
     -- Direct framebuffer refresh for instant feedback
     local w = stroke.width
-    fastScreenRefresh(ges.pos.x - w, ges.pos.y - w, w * 2, w * 2)
+    Screen:refreshFast(ges.pos.x - w, ges.pos.y - w, w * 2, w * 2)
 
     return true
 end
@@ -2055,11 +1897,9 @@ function Pencil:onDrawPan(ges)
 
     -- Eraser mode: erase along path (raw input doesn't handle eraser)
     if effective_tool == TOOL_ERASER then
-        if not self.eraser_path then
-            self.eraser_path = {}
+        if not self.eraser_deleted then
             self.eraser_deleted = {}
         end
-        table.insert(self.eraser_path, { x = ges.pos.x, y = ges.pos.y })
 
         local deleted = self:eraseAtPoint(ges.pos.x, ges.pos.y, page)
         if deleted then
@@ -2150,7 +1990,6 @@ function Pencil:onDrawPanRelease(ges)
         end
         -- Always refresh screen after erasing to clear any visual artifacts
         UIManager:setDirty(self.view, "partial")
-        self.eraser_path = nil
         self.eraser_deleted = nil
         return true
     end
@@ -2237,57 +2076,9 @@ end
 -- Clear strokes on current page
 function Pencil:clearPageStrokes()
     local page = self:getCurrentPage()
-    logger.info("Pencil: clearPageStrokes - current page =", page, "type =", type(page))
+    local indices_to_remove = self.page_strokes[page]
 
-    -- Debug: log all pages that have strokes and total stroke count
-    logger.info("Pencil: total strokes:", #self.strokes)
-    logger.info("Pencil: pages with strokes:")
-    for p, indices in pairs(self.page_strokes) do
-        logger.info("  page =", p, "type =", type(p), "stroke count =", #indices)
-    end
-
-    -- Collect ALL stroke indices that match this page
-    -- Search both by direct key lookup AND by iterating through all strokes
-    local indices_to_remove = {}
-    local indices_set = {}  -- To avoid duplicates
-
-    -- Method 1: Direct key lookup
-    if self.page_strokes[page] then
-        for _, idx in ipairs(self.page_strokes[page]) do
-            if not indices_set[idx] then
-                table.insert(indices_to_remove, idx)
-                indices_set[idx] = true
-            end
-        end
-    end
-
-    -- Method 2: Search by string comparison (handles type mismatches)
-    local page_str = tostring(page)
-    for p, p_indices in pairs(self.page_strokes) do
-        if tostring(p) == page_str and p ~= page then
-            logger.info("Pencil: found matching page via string comparison:", p, "->", page)
-            for _, idx in ipairs(p_indices) do
-                if not indices_set[idx] then
-                    table.insert(indices_to_remove, idx)
-                    indices_set[idx] = true
-                end
-            end
-        end
-    end
-
-    -- Method 3: Direct stroke iteration (most reliable fallback)
-    for i, stroke in ipairs(self.strokes) do
-        if stroke.page == page or tostring(stroke.page) == page_str then
-            if not indices_set[i] then
-                logger.info("Pencil: found stroke via direct iteration at index", i)
-                table.insert(indices_to_remove, i)
-                indices_set[i] = true
-            end
-        end
-    end
-
-    if #indices_to_remove == 0 then
-        logger.info("Pencil: clearPageStrokes - no strokes found for page", page)
+    if not indices_to_remove or #indices_to_remove == 0 then
         UIManager:show(InfoMessage:new{
             text = _("No annotations found on this page."),
             timeout = 1,
@@ -2295,24 +2086,25 @@ function Pencil:clearPageStrokes()
         return
     end
 
-    logger.info("Pencil: clearPageStrokes - removing", #indices_to_remove, "strokes from page", page)
-
-    -- Remove strokes (in reverse order to maintain indices)
-    table.sort(indices_to_remove, function(a, b) return a > b end)
-    local deleted_strokes = {}
+    -- Copy and sort in reverse order to maintain indices during removal
+    local sorted_indices = {}
     for _, idx in ipairs(indices_to_remove) do
+        table.insert(sorted_indices, idx)
+    end
+    table.sort(sorted_indices, function(a, b) return a > b end)
+
+    local deleted_strokes = {}
+    for _, idx in ipairs(sorted_indices) do
         if self.strokes[idx] then
             table.insert(deleted_strokes, self.strokes[idx])
             table.remove(self.strokes, idx)
         end
     end
 
-    -- Add to undo stack
     if #deleted_strokes > 0 then
         table.insert(self.undo_stack, { type = "delete", strokes = deleted_strokes })
     end
 
-    -- Rebuild index
     self:rebuildPageIndex()
     self:saveStrokes()
 
@@ -2330,15 +2122,6 @@ function Pencil:clearAllStrokes()
     self:saveStrokes()
 
     UIManager:setDirty(self.view, "ui")
-end
-
--- Calculate bounding box for a stroke
-function Pencil:getStrokeBounds(stroke)
-    local bounds = PencilGeometry.getStrokeBounds(stroke)
-    if not bounds then
-        return nil
-    end
-    return Geom:new(bounds)
 end
 
 -- Render a line segment using rectangles (since BlitBuffer has no native line drawing)
@@ -2416,12 +2199,6 @@ function Pencil:eraseAtPoint(x, y, page)
     local eraser_width = self.tool_settings[TOOL_ERASER].width
     local deleted = {}
     local indices_to_remove = {}
-    local page_str = tostring(page)
-
-    -- Helper to check if stroke belongs to current page (handles type mismatches)
-    local function isOnCurrentPage(stroke)
-        return stroke.page == page or tostring(stroke.page) == page_str
-    end
 
     -- Find strokes on the current page that intersect with eraser point
     for i, stroke in ipairs(self.strokes) do
@@ -2437,7 +2214,7 @@ function Pencil:eraseAtPoint(x, y, page)
             self:writeDebugLog(string.format("ERASE: stroke %d bounds: (%d-%d, %d-%d), eraser at (%d,%d) threshold=%d",
                 i, min_x, max_x, min_y, max_y, x, y, eraser_width))
         end
-        if stroke and isOnCurrentPage(stroke) and self:isPointNearStroke(x, y, stroke, eraser_width) then
+        if stroke and stroke.page == page and self:isPointNearStroke(x, y, stroke, eraser_width) then
             table.insert(deleted, stroke)
             table.insert(indices_to_remove, i)
             if self.input_debug_mode then
@@ -2677,7 +2454,6 @@ function Pencil:onCloseDocument()
     self:saveStrokes()
 
     -- Clear state
-    self.eraser_path = nil
     self.eraser_deleted = nil
     self.undo_stack = {}
 end
@@ -2724,7 +2500,6 @@ function Pencil:onPageUpdate(pageno)
         self:saveStrokes()
     end
     self.current_stroke = nil
-    self.eraser_path = nil
     self.eraser_deleted = nil
 end
 
@@ -2738,190 +2513,7 @@ function Pencil:onUpdatePos()
         self:saveStrokes()
     end
     self.current_stroke = nil
-    self.eraser_path = nil
     self.eraser_deleted = nil
-end
-
--- Get exportable data for all pencil annotations
--- Returns array of annotation entries compatible with exporter format
-function Pencil:getExportableAnnotations()
-    local annotations = {}
-
-    for i, stroke in ipairs(self.strokes) do
-        local page_display = stroke.page
-        if type(stroke.page) == "string" then
-            -- xpointer - try to get page number
-            if self.ui.document and self.ui.document.getPageFromXPointer then
-                page_display = self.ui.document:getPageFromXPointer(stroke.page) or stroke.page
-            end
-        end
-
-        local tool = stroke.tool or TOOL_PEN
-        table.insert(annotations, {
-            sort = "pencil",
-            page = page_display,
-            time = stroke.datetime or os.time(),
-            drawer = tool,
-            text = string.format(_("%s annotation (%d points)"), tool, #stroke.points),
-            note = nil,
-            chapter = nil,
-            -- Include stroke metadata for full export
-            stroke_data = {
-                tool = tool,
-                points = stroke.points,
-                width = stroke.width,
-                page_ref = stroke.page,
-            },
-        })
-    end
-
-    return annotations
-end
-
--- Get summary of pencil annotations for a given page
-function Pencil:getAnnotationSummary()
-    local summary = {}
-    for page, indices in pairs(self.page_strokes) do
-        summary[page] = #indices
-    end
-    return summary
-end
-
--- Get document title for export filename
-function Pencil:getDocumentTitle()
-    local title = self.ui.doc_props and self.ui.doc_props.title
-    if not title or title == "" then
-        -- Fallback to filename without extension
-        local filepath = self.ui.document.file
-        title = filepath:match("([^/]+)%.[^.]+$") or "unknown"
-    end
-    return title
-end
-
--- Get export directory
-function Pencil:getExportPath()
-    local export_dir = DataStorage:getDataDir() .. "/pencil_exports"
-    -- Create directory if it doesn't exist
-    if lfs.attributes(export_dir, "mode") ~= "directory" then
-        lfs.mkdir(export_dir)
-    end
-    return export_dir
-end
-
--- Export annotations to JSON file
-function Pencil:exportToJSON()
-    local title = self:getDocumentTitle()
-    local export_dir = self:getExportPath()
-    local filename = export_dir .. "/" .. title:gsub("[^%w%-_]", "_") .. "_pencil.json"
-
-    local export_data = {
-        version = 1,
-        document = {
-            title = title,
-            file = self.ui.document.file,
-            export_time = os.date("%Y-%m-%d %H:%M:%S"),
-        },
-        strokes = {},
-    }
-
-    for i, stroke in ipairs(self.strokes) do
-        local page_display = stroke.page
-        if type(stroke.page) == "string" and self.ui.document.getPageFromXPointer then
-            page_display = self.ui.document:getPageFromXPointer(stroke.page) or stroke.page
-        end
-
-        table.insert(export_data.strokes, {
-            page = page_display,
-            page_ref = stroke.page,
-            tool = stroke.tool or TOOL_PEN,
-            points = stroke.points,
-            width = stroke.width,
-            datetime = stroke.datetime,
-        })
-    end
-
-    local file = io.open(filename, "w")
-    if file then
-        file:write(json.encode(export_data))
-        file:close()
-
-        UIManager:show(InfoMessage:new{
-            text = T(_("Exported %1 annotations to:\n%2"), #self.strokes, filename),
-            timeout = 3,
-        })
-        logger.dbg("Pencil: exported to", filename)
-    else
-        UIManager:show(InfoMessage:new{
-            text = _("Failed to export annotations."),
-            timeout = 3,
-        })
-    end
-end
-
--- Export annotations to text file
-function Pencil:exportToText()
-    local title = self:getDocumentTitle()
-    local export_dir = self:getExportPath()
-    local filename = export_dir .. "/" .. title:gsub("[^%w%-_]", "_") .. "_pencil.txt"
-
-    local file = io.open(filename, "w")
-    if file then
-        file:write("Pencil Annotations\n")
-        file:write("==================\n\n")
-        file:write("Document: " .. title .. "\n")
-        file:write("Exported: " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n")
-        file:write("Total annotations: " .. #self.strokes .. "\n\n")
-
-        -- Group by page
-        local pages = {}
-        for i, stroke in ipairs(self.strokes) do
-            local page_display = stroke.page
-            if type(stroke.page) == "string" and self.ui.document.getPageFromXPointer then
-                page_display = self.ui.document:getPageFromXPointer(stroke.page) or stroke.page
-            end
-            if not pages[page_display] then
-                pages[page_display] = {}
-            end
-            table.insert(pages[page_display], stroke)
-        end
-
-        -- Sort pages and output
-        local sorted_pages = {}
-        for page in pairs(pages) do
-            table.insert(sorted_pages, page)
-        end
-        table.sort(sorted_pages, function(a, b)
-            if type(a) == "number" and type(b) == "number" then
-                return a < b
-            end
-            return tostring(a) < tostring(b)
-        end)
-
-        for _, page in ipairs(sorted_pages) do
-            local strokes = pages[page]
-            file:write(string.format("Page %s: %d annotation(s)\n", tostring(page), #strokes))
-            for j, stroke in ipairs(strokes) do
-                local time_str = stroke.datetime and os.date("%Y-%m-%d %H:%M", stroke.datetime) or "unknown"
-                local tool = stroke.tool or "pen"
-                file:write(string.format("  - Stroke %d: %s, %d points, width %d, created %s\n",
-                    j, tool, #stroke.points, stroke.width or 3, time_str))
-            end
-            file:write("\n")
-        end
-
-        file:close()
-
-        UIManager:show(InfoMessage:new{
-            text = T(_("Exported %1 annotations to:\n%2"), #self.strokes, filename),
-            timeout = 3,
-        })
-        logger.dbg("Pencil: exported to", filename)
-    else
-        UIManager:show(InfoMessage:new{
-            text = _("Failed to export annotations."),
-            timeout = 3,
-        })
-    end
 end
 
 return Pencil
