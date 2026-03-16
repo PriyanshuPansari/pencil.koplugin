@@ -42,6 +42,10 @@ local TOOL_ERASER = "eraser"
 local COLOR_PICKER_DELAY_MS = 500  -- How long pen must be held still (milliseconds)
 local COLOR_PICKER_TOLERANCE_PIXELS = 15  -- How many pixels pen can move while "still"
 
+-- Annotation grouping constants
+local GROUP_TIME_THRESHOLD_S = 10   -- seconds between strokes to be grouped
+local GROUP_SPATIAL_THRESHOLD = 200 -- pixels between bboxes to be grouped
+
 local Pencil = InputContainer:extend{
     name = "pencil_annotation",
     is_doc_only = true,  -- Only available when a document is open
@@ -112,6 +116,7 @@ function Pencil:init()
     self.ui.menu:registerToMainMenu(self)
     self.strokes = {}
     self.page_strokes = {}  -- Index: page -> array of stroke indices
+    self.annotation_groups = {}  -- Annotation groups for bookmark integration
     self.undo_stack = {}
 
     -- Initialize highlighter color (yellow)
@@ -635,6 +640,7 @@ function Pencil:endRawStroke()
         self:indexStroke(#self.strokes, self.current_stroke.page)
         self:saveStrokes()
         table.insert(self.undo_stack, { type = "add", stroke_idx = #self.strokes })
+        self:assignStrokeToGroup(#self.strokes)
         if self.input_debug_mode then
             self:writeDebugLog(string.format("endRawStroke: SAVED stroke #%d with %d points, total strokes=%d",
                 #self.strokes, #self.current_stroke.points, #self.strokes))
@@ -708,6 +714,8 @@ function Pencil:loadSettings()
     self.current_tool = TOOL_PEN
     -- Input debug mode: log all input details
     self.input_debug_mode = settings.input_debug_mode or false
+    -- Experimental features
+    self.experimental_bookmark_sync = settings.experimental_bookmark_sync or false
     -- Load pen color by name and look up the actual color value
     local color_name = settings.pen_color_name
     if color_name then
@@ -725,6 +733,7 @@ end
 function Pencil:saveSettings()
     G_reader_settings:saveSetting("pencil_annotation_settings", {
         input_debug_mode = self.input_debug_mode,
+        experimental_bookmark_sync = self.experimental_bookmark_sync,
         pen_color_name = self.tool_settings[TOOL_PEN].color_name,
     })
 end
@@ -832,6 +841,36 @@ function Pencil:addToMainMenu(menu_items)
                 enabled_func = function()
                     return #self.strokes > 0
                 end,
+                separator = true,
+            },
+            {
+                text = _("Experimental"),
+                sub_item_table = {
+                    {
+                        text = _("Bookmark sync"),
+                        help_text = _("Automatically create KOReader bookmarks for pencil annotations so you can navigate to annotated pages from the Bookmarks menu."),
+                        checked_func = function()
+                            return self.experimental_bookmark_sync
+                        end,
+                        callback = function()
+                            self.experimental_bookmark_sync = not self.experimental_bookmark_sync
+                            self:saveSettings()
+                            if self.experimental_bookmark_sync then
+                                self:syncAllBookmarks()
+                                UIManager:show(InfoMessage:new{
+                                    text = _("Bookmark sync enabled. Pencil annotations will appear in the Bookmarks menu."),
+                                    timeout = 3,
+                                })
+                            else
+                                self:removeAllPencilBookmarks()
+                                UIManager:show(InfoMessage:new{
+                                    text = _("Bookmark sync disabled. Pencil bookmarks removed."),
+                                    timeout = 3,
+                                })
+                            end
+                        end,
+                    },
+                },
                 separator = true,
             },
             {
@@ -1105,6 +1144,7 @@ function Pencil:undoLastStroke()
         if stroke_idx and self.strokes[stroke_idx] then
             table.remove(self.strokes, stroke_idx)
             self:rebuildPageIndex()
+            self:rebuildAnnotationGroups()
             self:saveStrokes()
             UIManager:setDirty(self.view, "ui")
         end
@@ -1114,6 +1154,7 @@ function Pencil:undoLastStroke()
             table.insert(self.strokes, stroke)
         end
         self:rebuildPageIndex()
+        self:rebuildAnnotationGroups()
         self:saveStrokes()
         UIManager:setDirty(self.view, "ui")
     end
@@ -2011,6 +2052,7 @@ function Pencil:onDrawPanRelease(ges)
 
         -- Add to undo stack
         table.insert(self.undo_stack, { type = "add", stroke_idx = #self.strokes })
+        self:assignStrokeToGroup(#self.strokes)
 
         logger.dbg("Pencil: stroke completed with", #self.current_stroke.points, "points")
     end
@@ -2045,6 +2087,219 @@ function Pencil:indexStroke(stroke_idx, page)
         self.page_strokes[page] = {}
     end
     table.insert(self.page_strokes[page], stroke_idx)
+end
+
+-- Assign a newly-added stroke to an annotation group (or create a new one).
+-- Called after a stroke is finalized and inserted into self.strokes.
+-- @param stroke_idx number  index of the stroke in self.strokes
+-- @param skip_bookmark boolean  if true, skip bookmark sync (used during bootstrap)
+function Pencil:assignStrokeToGroup(stroke_idx, skip_bookmark)
+    local stroke = self.strokes[stroke_idx]
+    if not stroke then return end
+
+    local bbox = PencilGeometry.computeStrokeBbox(stroke)
+    if not bbox then return end
+
+    local stroke_time = stroke.datetime or 0
+    local best_group = nil
+
+    for _, group in ipairs(self.annotation_groups) do
+        if group.page == stroke.page then
+            local time_diff = math.abs(stroke_time - (group.datetime_last or group.datetime or 0))
+            if time_diff <= GROUP_TIME_THRESHOLD_S then
+                local dist = PencilGeometry.bboxDistance(bbox, group.bbox)
+                if dist <= GROUP_SPATIAL_THRESHOLD then
+                    best_group = group
+                    break
+                end
+            end
+        end
+    end
+
+    if best_group then
+        -- Merge into existing group
+        table.insert(best_group.stroke_indices, stroke_idx)
+        best_group.bbox = PencilGeometry.bboxUnion(best_group.bbox, bbox)
+        best_group.datetime_last = math.max(best_group.datetime_last or 0, stroke_time)
+        -- Update tool to majority
+        local pen_count, hl_count = 0, 0
+        for _, si in ipairs(best_group.stroke_indices) do
+            local s = self.strokes[si]
+            if s then
+                if s.tool == TOOL_HIGHLIGHTER then hl_count = hl_count + 1
+                else pen_count = pen_count + 1 end
+            end
+        end
+        best_group.tool = hl_count > pen_count and TOOL_HIGHLIGHTER or TOOL_PEN
+        if not skip_bookmark then
+            self:syncGroupBookmark(best_group)
+        end
+    else
+        -- Create new group
+        local group = {
+            id = "pencil_" .. os.date("%Y%m%d%H%M%S") .. "_" .. stroke_idx,
+            page = stroke.page,
+            stroke_indices = { stroke_idx },
+            bbox = bbox,
+            datetime = stroke_time,
+            datetime_last = stroke_time,
+            tool = (stroke.tool == TOOL_HIGHLIGHTER) and TOOL_HIGHLIGHTER or TOOL_PEN,
+        }
+        table.insert(self.annotation_groups, group)
+        if not skip_bookmark then
+            self:syncGroupBookmark(group)
+        end
+    end
+end
+
+-- Rebuild all annotation groups from scratch by re-running the grouping algorithm
+-- on all existing strokes sorted by datetime. Called after erase/undo operations.
+function Pencil:rebuildAnnotationGroups()
+    local ok, err = pcall(function()
+        -- Remove all existing bookmarks for pencil groups
+        for _, group in ipairs(self.annotation_groups) do
+            self:removeGroupBookmark(group)
+        end
+
+        self.annotation_groups = {}
+
+        -- Build list of {index, datetime} sorted by datetime
+        local sorted = {}
+        for i, stroke in ipairs(self.strokes) do
+            table.insert(sorted, { idx = i, dt = stroke.datetime or 0 })
+        end
+        table.sort(sorted, function(a, b) return a.dt < b.dt end)
+
+        -- Re-assign each stroke
+        for _, entry in ipairs(sorted) do
+            self:assignStrokeToGroup(entry.idx)
+        end
+    end)
+    if not ok then
+        logger.warn("Pencil: rebuildAnnotationGroups failed:", err)
+        self.annotation_groups = self.annotation_groups or {}
+    end
+end
+
+-- Get page number for bookmark display (always numeric).
+function Pencil:getPageNumber(page_ref)
+    if type(page_ref) == "number" then
+        return page_ref
+    end
+    -- For XPointer (rolling docs), try to convert
+    if self.ui.document and self.ui.document.getPageFromXPointer then
+        local pn = self.ui.document:getPageFromXPointer(page_ref)
+        if pn then return pn end
+    end
+    return 0
+end
+
+-- Get the bookmark page reference for a group.
+-- For paging mode (PDF), this is the page number.
+-- For rolling mode (EPUB), this must be an XPointer.
+function Pencil:getBookmarkPageRef(group_page)
+    if self.ui.rolling and self.ui.document and self.ui.document.getPageXPointer then
+        -- group.page is a number (from getCurrentPage), convert back to XPointer
+        return self.ui.document:getPageXPointer(group_page)
+    end
+    return group_page
+end
+
+-- Sync a group's bookmark into KOReader's annotation system.
+function Pencil:syncGroupBookmark(group)
+    if not self.experimental_bookmark_sync then return end
+    if not self.ui or not self.ui.annotation then
+        logger.dbg("Pencil: annotation module not available, skipping bookmark sync")
+        return
+    end
+    if not self.ui.annotation.annotations then
+        logger.dbg("Pencil: annotations not loaded yet, skipping bookmark sync")
+        return
+    end
+
+    local ok, err = pcall(function()
+        -- Remove existing bookmark for this group first
+        self:removeGroupBookmark(group)
+
+        local pageno = self:getPageNumber(group.page)
+        local bookmark_page = self:getBookmarkPageRef(group.page)
+        local chapter = ""
+        if self.ui.toc and self.ui.toc.getTocTitleByPage then
+            chapter = self.ui.toc:getTocTitleByPage(bookmark_page) or ""
+        end
+
+        local datetime = group.id  -- use group id as unique datetime key
+        group.bookmark_datetime = datetime
+
+        local item = {
+            page = bookmark_page,
+            datetime = datetime,
+            text = string.format("Pencil annotation on page %d", pageno),
+            chapter = chapter,
+        }
+
+        if self.ui.annotation.addItem then
+            self.ui.annotation:addItem(item)
+            logger.dbg("Pencil: synced bookmark for group", group.id, "on page", pageno)
+        else
+            logger.warn("Pencil: annotation.addItem not available")
+        end
+    end)
+    if not ok then
+        logger.warn("Pencil: bookmark sync failed:", err)
+    end
+end
+
+-- Remove a group's bookmark from KOReader's annotation system.
+function Pencil:removeGroupBookmark(group)
+    if not self.experimental_bookmark_sync then return end
+    if not self.ui or not self.ui.annotation then return end
+    if not group.bookmark_datetime then return end
+
+    local ok, err = pcall(function()
+        local annotations = self.ui.annotation.annotations
+        if not annotations then return end
+
+        for i, ann in ipairs(annotations) do
+            if ann.datetime == group.bookmark_datetime then
+                table.remove(annotations, i)
+                logger.dbg("Pencil: removed bookmark for group", group.id)
+                return
+            end
+        end
+    end)
+    if not ok then
+        logger.warn("Pencil: bookmark removal failed:", err)
+    end
+end
+
+-- Remove ALL pencil bookmarks from KOReader's annotation system.
+-- Used before re-syncing to avoid duplicates.
+-- Note: always runs regardless of feature flag, so disabling cleans up.
+function Pencil:removeAllPencilBookmarks()
+    if not self.ui or not self.ui.annotation then return end
+    local annotations = self.ui.annotation.annotations
+    if not annotations then return end
+
+    -- Remove in reverse order to maintain indices
+    for i = #annotations, 1, -1 do
+        if annotations[i].datetime and annotations[i].datetime:match("^pencil_") then
+            table.remove(annotations, i)
+        end
+    end
+end
+
+-- Sync all annotation groups to bookmarks (used after load/rebuild).
+function Pencil:syncAllBookmarks()
+    if not self.experimental_bookmark_sync then return end
+
+    -- Clean slate: remove all pencil bookmarks first to avoid duplicates
+    self:removeAllPencilBookmarks()
+
+    for _, group in ipairs(self.annotation_groups) do
+        self:syncGroupBookmark(group)
+    end
+    logger.info("Pencil: synced", #self.annotation_groups, "annotation group bookmarks")
 end
 
 -- Rebuild page index from strokes
@@ -2106,6 +2361,7 @@ function Pencil:clearPageStrokes()
     end
 
     self:rebuildPageIndex()
+    self:rebuildAnnotationGroups()
     self:saveStrokes()
 
     UIManager:show(InfoMessage:new{
@@ -2117,8 +2373,13 @@ end
 
 -- Clear all strokes
 function Pencil:clearAllStrokes()
+    -- Remove all bookmarks for annotation groups
+    for _, group in ipairs(self.annotation_groups) do
+        self:removeGroupBookmark(group)
+    end
     self.strokes = {}
     self.page_strokes = {}
+    self.annotation_groups = {}
     self:saveStrokes()
 
     UIManager:setDirty(self.view, "ui")
@@ -2230,6 +2491,7 @@ function Pencil:eraseAtPoint(x, y, page)
             table.remove(self.strokes, idx)
         end
         self:rebuildPageIndex()
+        self:rebuildAnnotationGroups()
         if self.input_debug_mode then
             self:writeDebugLog(string.format("ERASE: deleted %d strokes", #deleted))
         end
@@ -2342,11 +2604,32 @@ function Pencil:loadStrokes()
             self.strokes[i] = self:strokeFromSaved(saved)
         end
         self:rebuildPageIndex()
+
+        -- Load annotation groups or bootstrap from v1 data
+        if data.annotation_groups and #data.annotation_groups > 0 then
+            self.annotation_groups = data.annotation_groups
+            logger.info("Pencil: loaded", #self.annotation_groups, "annotation groups")
+        else
+            -- v1 data or no groups — bootstrap by running grouping on all strokes
+            -- skip_bookmark=true because annotation module isn't ready yet during load
+            logger.info("Pencil: bootstrapping annotation groups from strokes")
+            self.annotation_groups = {}
+            local sorted = {}
+            for i, stroke in ipairs(self.strokes) do
+                table.insert(sorted, { idx = i, dt = stroke.datetime or 0 })
+            end
+            table.sort(sorted, function(a, b) return a.dt < b.dt end)
+            for _, entry in ipairs(sorted) do
+                self:assignStrokeToGroup(entry.idx, true)
+            end
+        end
+
         logger.info("Pencil: loaded", #self.strokes, "strokes from", filepath)
     else
         logger.warn("Pencil: failed to load strokes from", filepath, "error:", data)
         self.strokes = {}
         self.page_strokes = {}
+        self.annotation_groups = {}
     end
 end
 
@@ -2401,6 +2684,19 @@ function Pencil:saveStrokes()
         return
     end
 
+    -- Safety: never overwrite a non-empty file with empty data
+    if #self.strokes == 0 then
+        local existing = io.open(filepath, "r")
+        if existing then
+            local content = existing:read(200)
+            existing:close()
+            if content and content:match("%[%d+%]") then
+                logger.warn("Pencil: refusing to overwrite non-empty strokes file with empty data")
+                return
+            end
+        end
+    end
+
     -- Ensure the directory exists
     local sidecar_dir = self.ui.doc_settings.doc_sidecar_dir
     if sidecar_dir then
@@ -2418,8 +2714,9 @@ function Pencil:saveStrokes()
 
     -- Serialize and write
     local data = {
-        version = 1,
+        version = 2,
         strokes = saveable_strokes,
+        annotation_groups = self.annotation_groups,
     }
 
     local f, err = io.open(filepath, "w")
@@ -2449,6 +2746,9 @@ function Pencil:onCloseDocument()
 
     self:teardownPenInput()
 
+    -- Final bookmark sync before close
+    self:syncAllBookmarks()
+
     -- Always save strokes on close (even if empty, to clear any previous data)
     logger.info("Pencil: saving strokes on document close")
     self:saveStrokes()
@@ -2467,8 +2767,14 @@ function Pencil:onReaderReady()
     end
 
     -- Force reload strokes (in case they weren't loaded in init)
-    self:loadStrokes()
-    logger.info("Pencil: after loadStrokes, strokes count =", #self.strokes)
+    if #self.strokes == 0 then
+        self:loadStrokes()
+    end
+    logger.info("Pencil: after loadStrokes, strokes count =", #self.strokes,
+        "groups =", #self.annotation_groups)
+
+    -- Sync annotation group bookmarks now that UI modules are ready
+    self:syncAllBookmarks()
 
     -- Re-setup touch zones if enabled
     if self:isEnabled() and not self.touch_zones_registered then

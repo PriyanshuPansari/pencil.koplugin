@@ -17,6 +17,7 @@ If you resize your book while reading it, your annotations will be WONKY. This i
 - **Color selection**: Hold the pen still to open a color picker with 10 color options
 - **Undo**: Undo your last stroke or eraser action
 - **Clear strokes**: Clear annotations for the current page or the entire document
+- **Annotation grouping**: Strokes are automatically grouped into logical annotations based on timing and proximity
 - **Enable/disable toggle**: Turn the plugin on or off via the menu or a mapped gesture
 - **Per-document storage**: Annotations are saved with each book
 - **Input debug mode**: Log raw stylus events to help diagnose detection issues
@@ -41,6 +42,27 @@ If you resize your book while reading it, your annotations will be WONKY. This i
 
 If you have any questions or a feature request, please submit an issue in this repo.
 If you're experiencing issues with the plugin, please enable input debug mode in the Pencil menu, reproduce the issue, and include the debug log file in your issue report.
+
+## Experimental Features
+
+Some features are still in development and are hidden behind an experimental toggle. You can find them under **Pencil menu > Experimental**.
+
+### Bookmark Sync
+
+When enabled, the plugin automatically groups your pencil strokes into logical annotations (based on timing and proximity) and creates KOReader bookmarks for each one. This means annotated pages show up in the **Bookmarks menu**, so you can quickly navigate back to pages you've written on.
+
+**To enable:** Pencil menu > Experimental > Bookmark sync
+
+**What happens when you turn it on:**
+- Existing pencil annotations are grouped and bookmarks are created immediately
+- New strokes are grouped and bookmarked as you draw
+- Bookmarks appear in KOReader's Bookmarks menu as "Pencil annotation on page X"
+- Erasing or undoing strokes updates the bookmarks automatically
+
+**What happens when you turn it off:**
+- All pencil bookmarks are removed from the Bookmarks menu
+- Your pencil strokes and drawings are not affected — only the bookmarks are removed
+- Annotation groups are still tracked internally, so you won't lose any grouping data if you turn it back on
 
 ## Features In the Pipeline
 
