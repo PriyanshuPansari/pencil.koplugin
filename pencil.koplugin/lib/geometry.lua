@@ -59,4 +59,56 @@ function Geometry.transformForRotation(x, y, rotation, screen_width, screen_heig
     return x, y  -- fallback for unknown rotation
 end
 
+--- Compute the bounding box of a stroke from its points array.
+-- @param stroke Table with points array (each point has x, y)
+-- @return table {x0, y0, x1, y1} or nil if no points
+function Geometry.computeStrokeBbox(stroke)
+    if not stroke or not stroke.points or #stroke.points == 0 then
+        return nil
+    end
+    local p = stroke.points[1]
+    local x0, y0, x1, y1 = p.x, p.y, p.x, p.y
+    for i = 2, #stroke.points do
+        p = stroke.points[i]
+        if p.x < x0 then x0 = p.x end
+        if p.y < y0 then y0 = p.y end
+        if p.x > x1 then x1 = p.x end
+        if p.y > y1 then y1 = p.y end
+    end
+    return { x0 = x0, y0 = y0, x1 = x1, y1 = y1 }
+end
+
+--- Compute minimum pixel distance between two bounding boxes.
+-- Returns 0 if the boxes overlap.
+-- @param a table {x0, y0, x1, y1}
+-- @param b table {x0, y0, x1, y1}
+-- @return number minimum distance in pixels
+function Geometry.bboxDistance(a, b)
+    -- Compute gap on each axis (negative means overlap)
+    local dx = math.max(a.x0 - b.x1, b.x0 - a.x1, 0)
+    local dy = math.max(a.y0 - b.y1, b.y0 - a.y1, 0)
+    if dx == 0 and dy == 0 then
+        return 0  -- overlapping
+    elseif dx == 0 then
+        return dy
+    elseif dy == 0 then
+        return dx
+    else
+        return math.sqrt(dx * dx + dy * dy)
+    end
+end
+
+--- Compute the union of two bounding boxes.
+-- @param a table {x0, y0, x1, y1}
+-- @param b table {x0, y0, x1, y1}
+-- @return table {x0, y0, x1, y1}
+function Geometry.bboxUnion(a, b)
+    return {
+        x0 = math.min(a.x0, b.x0),
+        y0 = math.min(a.y0, b.y0),
+        x1 = math.max(a.x1, b.x1),
+        y1 = math.max(a.y1, b.y1),
+    }
+end
+
 return Geometry
