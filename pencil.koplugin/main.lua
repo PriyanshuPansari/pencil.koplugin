@@ -714,6 +714,8 @@ function Pencil:loadSettings()
     self.current_tool = TOOL_PEN
     -- Input debug mode: log all input details
     self.input_debug_mode = settings.input_debug_mode or false
+    -- Experimental features
+    self.experimental_bookmark_sync = settings.experimental_bookmark_sync or false
     -- Load pen color by name and look up the actual color value
     local color_name = settings.pen_color_name
     if color_name then
@@ -731,6 +733,7 @@ end
 function Pencil:saveSettings()
     G_reader_settings:saveSetting("pencil_annotation_settings", {
         input_debug_mode = self.input_debug_mode,
+        experimental_bookmark_sync = self.experimental_bookmark_sync,
         pen_color_name = self.tool_settings[TOOL_PEN].color_name,
     })
 end
@@ -838,6 +841,36 @@ function Pencil:addToMainMenu(menu_items)
                 enabled_func = function()
                     return #self.strokes > 0
                 end,
+                separator = true,
+            },
+            {
+                text = _("Experimental"),
+                sub_item_table = {
+                    {
+                        text = _("Bookmark sync"),
+                        help_text = _("Automatically create KOReader bookmarks for pencil annotations so you can navigate to annotated pages from the Bookmarks menu."),
+                        checked_func = function()
+                            return self.experimental_bookmark_sync
+                        end,
+                        callback = function()
+                            self.experimental_bookmark_sync = not self.experimental_bookmark_sync
+                            self:saveSettings()
+                            if self.experimental_bookmark_sync then
+                                self:syncAllBookmarks()
+                                UIManager:show(InfoMessage:new{
+                                    text = _("Bookmark sync enabled. Pencil annotations will appear in the Bookmarks menu."),
+                                    timeout = 3,
+                                })
+                            else
+                                self:removeAllPencilBookmarks()
+                                UIManager:show(InfoMessage:new{
+                                    text = _("Bookmark sync disabled. Pencil bookmarks removed."),
+                                    timeout = 3,
+                                })
+                            end
+                        end,
+                    },
+                },
                 separator = true,
             },
             {
@@ -2174,6 +2207,7 @@ end
 
 -- Sync a group's bookmark into KOReader's annotation system.
 function Pencil:syncGroupBookmark(group)
+    if not self.experimental_bookmark_sync then return end
     if not self.ui or not self.ui.annotation then
         logger.dbg("Pencil: annotation module not available, skipping bookmark sync")
         return
@@ -2218,6 +2252,7 @@ end
 
 -- Remove a group's bookmark from KOReader's annotation system.
 function Pencil:removeGroupBookmark(group)
+    if not self.experimental_bookmark_sync then return end
     if not self.ui or not self.ui.annotation then return end
     if not group.bookmark_datetime then return end
 
@@ -2240,6 +2275,7 @@ end
 
 -- Remove ALL pencil bookmarks from KOReader's annotation system.
 -- Used before re-syncing to avoid duplicates.
+-- Note: always runs regardless of feature flag, so disabling cleans up.
 function Pencil:removeAllPencilBookmarks()
     if not self.ui or not self.ui.annotation then return end
     local annotations = self.ui.annotation.annotations
@@ -2255,6 +2291,8 @@ end
 
 -- Sync all annotation groups to bookmarks (used after load/rebuild).
 function Pencil:syncAllBookmarks()
+    if not self.experimental_bookmark_sync then return end
+
     -- Clean slate: remove all pencil bookmarks first to avoid duplicates
     self:removeAllPencilBookmarks()
 
