@@ -117,6 +117,7 @@ function Pencil:init()
     self.strokes = {}
     self.page_strokes = {}  -- Index: page -> array of stroke indices
     self.annotation_groups = {}  -- Annotation groups for bookmark integration
+    self.strokes_loaded = false  -- Set true after successful loadStrokes
     self.undo_stack = {}
 
     -- Initialize highlighter color (yellow)
@@ -2592,6 +2593,7 @@ function Pencil:loadStrokes()
         logger.info("Pencil: strokes file does not exist yet:", filepath)
         self.strokes = {}
         self.page_strokes = {}
+        self.strokes_loaded = true
         return
     end
     file_exists:close()
@@ -2624,6 +2626,7 @@ function Pencil:loadStrokes()
             end
         end
 
+        self.strokes_loaded = true
         logger.info("Pencil: loaded", #self.strokes, "strokes from", filepath)
     else
         logger.warn("Pencil: failed to load strokes from", filepath, "error:", data)
@@ -2684,17 +2687,11 @@ function Pencil:saveStrokes()
         return
     end
 
-    -- Safety: never overwrite a non-empty file with empty data
-    if #self.strokes == 0 then
-        local existing = io.open(filepath, "r")
-        if existing then
-            local content = existing:read(200)
-            existing:close()
-            if content and content:match("%[%d+%]") then
-                logger.warn("Pencil: refusing to overwrite non-empty strokes file with empty data")
-                return
-            end
-        end
+    -- Safety: don't save empty data if strokes were never successfully loaded
+    -- (prevents data loss if a crash causes save before load completes)
+    if #self.strokes == 0 and not self.strokes_loaded then
+        logger.warn("Pencil: refusing to save empty strokes (strokes never loaded)")
+        return
     end
 
     -- Ensure the directory exists

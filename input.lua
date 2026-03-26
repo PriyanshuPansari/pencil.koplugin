@@ -216,7 +216,7 @@ function Input:init()
     if self.input then -- luacheck: ignore 542
         -- Already setup (e.g. stubbed by the testsuite).
     elseif self.device:isSDL() then
-        self.input = require("ffi/input_SDL2_0")
+        self.input = require("ffi/input_SDL3")
         self.hasClipboardText = function()
             return self.input.hasClipboardText()
         end
@@ -701,36 +701,6 @@ function Input:resetState()
 end
 
 function Input:handleKeyBoardEv(ev)
-    -- Track eraser end state via BTN_STYLUS (code 331) on Kobo
-    -- When eraser end touches screen, Kobo sends BTN_STYLUS press
-    -- This is mapped to "Eraser" in Kobo's event_map
-    -- Discovery based on eraser.koplugin by SimonLiu <simonliu423@gmail.com>
-    -- We just track the state here; routeStylusEvents will use it
-    if ev.code == C.BTN_STYLUS then
-        self.kobo_eraser_active = (ev.value == 1)
-    end
-
-    -- Handle stylus tool type for all protocols (pen tip vs eraser end)
-    if ev.code == C.BTN_TOOL_PEN then
-        self:setupSlotData(self.pen_slot)
-        if ev.value == 1 then
-            self:setCurrentMtSlot("tool", TOOL_TYPE_PEN)
-        else
-            self:setCurrentMtSlot("tool", TOOL_TYPE_FINGER)
-            self.cur_slot = self.main_finger_slot
-        end
-        return
-    elseif ev.code == C.BTN_TOOL_RUBBER then
-        self:setupSlotData(self.pen_slot)
-        if ev.value == 1 then
-            self:setCurrentMtSlot("tool", TOOL_TYPE_ERASER)
-        else
-            self:setCurrentMtSlot("tool", TOOL_TYPE_FINGER)
-            self.cur_slot = self.main_finger_slot
-        end
-        return
-    end
-
     -- Detect loss of contact for the "snow" protocol, as we *never* get EV_ABS:ABS_MT_TRACKING_ID:-1 on those...
     -- NOTE: The same logic *could* be used on *some* ST devices to detect contact states,
     --       but we instead prefer using EV_ABS:ABS_PRESSURE on those,
@@ -763,7 +733,39 @@ function Input:handleKeyBoardEv(ev)
 
             return
         end
-    elseif self.wacom_protocol then
+    end
+
+    -- Track eraser end state via BTN_STYLUS (code 331) on Kobo
+    -- When eraser end touches screen, Kobo sends BTN_STYLUS press
+    -- This is mapped to "Eraser" in Kobo's event_map
+    -- Discovery based on eraser.koplugin by SimonLiu <simonliu423@gmail.com>
+    -- We just track the state here; routeStylusEvents will use it
+    if ev.code == C.BTN_STYLUS then
+        self.kobo_eraser_active = (ev.value == 1)
+    end
+
+    -- Handle stylus tool type for all protocols (pen tip vs eraser end)
+    if ev.code == C.BTN_TOOL_PEN then
+        self:setupSlotData(self.pen_slot)
+        if ev.value == 1 then
+            self:setCurrentMtSlot("tool", TOOL_TYPE_PEN)
+        else
+            self:setCurrentMtSlot("tool", TOOL_TYPE_FINGER)
+            self.cur_slot = self.main_finger_slot
+        end
+        return
+    elseif ev.code == C.BTN_TOOL_RUBBER then
+        self:setupSlotData(self.pen_slot)
+        if ev.value == 1 then
+            self:setCurrentMtSlot("tool", TOOL_TYPE_ERASER)
+        else
+            self:setCurrentMtSlot("tool", TOOL_TYPE_FINGER)
+            self.cur_slot = self.main_finger_slot
+        end
+        return
+    end
+
+    if self.wacom_protocol then
         if ev.code == C.BTN_TOUCH then
             -- BTN_TOUCH is bracketed by BTN_TOOL_PEN/BTN_TOOL_RUBBER, so we can limit this to styluses, to avoid stomping on panel slots.
             local tool = self:getCurrentMtSlotData("tool")
@@ -1020,7 +1022,7 @@ function Input:handleTouchEv(ev)
         --       * PocketBook, because of our InkView EVT_POINTERMOVE translation
         --         (c.f., translateEvent @ ffi/input_pocketbook.lua).
         --       * SDL, because of our SDL_MOUSEMOTION/SDL_FINGERMOTION translation
-        --         (c.f., waitForEvent @ ffi/SDL2_0.lua).
+        --         (c.f., waitForEvent @ ffi/SDL3.lua).
         if ev.code == C.ABS_MT_SLOT then
             self:setupSlotData(ev.value)
         elseif ev.code == C.ABS_MT_TRACKING_ID then
@@ -1043,8 +1045,9 @@ function Input:handleTouchEv(ev)
             for _, MTSlot in ipairs(self.MTSlots) do
                 self:setMtSlot(MTSlot.slot, "timev", time.timeval(ev.time))
             end
-            -- feed ev in all slots to state machine
+            -- route stylus events before gesture detection
             self:routeStylusEvents()
+            -- feed ev in all slots to state machine
             local touch_gestures = self.gesture_detector:feedEvent(self.MTSlots)
             self:newFrame()
             local ges_evs = {}
@@ -1085,8 +1088,9 @@ function Input:handleMixedTouchEv(ev)
             for _, MTSlot in ipairs(self.MTSlots) do
                 self:setMtSlot(MTSlot.slot, "timev", time.timeval(ev.time))
             end
-            -- feed ev in all slots to state machine
+            -- route stylus events before gesture detection
             self:routeStylusEvents()
+            -- feed ev in all slots to state machine
             local touch_gestures = self.gesture_detector:feedEvent(self.MTSlots)
             self:newFrame()
             local ges_evs = {}
@@ -1111,7 +1115,7 @@ function Input:handleTouchEvSnow(ev)
         --       * PocketBook, because of our InkView EVT_POINTERMOVE translation
         --         (c.f., translateEvent @ ffi/input_pocketbook.lua).
         --       * SDL, because of our SDL_MOUSEMOTION/SDL_FINGERMOTION translation
-        --         (c.f., waitForEvent @ ffi/SDL2_0.lua).
+        --         (c.f., waitForEvent @ ffi/SDL3.lua).
         if ev.code == C.ABS_MT_SLOT then
             self:setupSlotData(ev.value)
         elseif ev.code == C.ABS_MT_TRACKING_ID then
@@ -1151,8 +1155,9 @@ function Input:handleTouchEvSnow(ev)
             for _, MTSlot in ipairs(self.MTSlots) do
                 self:setMtSlot(MTSlot.slot, "timev", time.timeval(ev.time))
             end
-            -- feed ev in all slots to state machine
+            -- route stylus events before gesture detection
             self:routeStylusEvents()
+            -- feed ev in all slots to state machine
             local touch_gestures = self.gesture_detector:feedEvent(self.MTSlots)
             self:newFrame()
             local ges_evs = {}
@@ -1212,8 +1217,9 @@ function Input:handleTouchEvPhoenix(ev)
             for _, MTSlot in ipairs(self.MTSlots) do
                 self:setMtSlot(MTSlot.slot, "timev", time.timeval(ev.time))
             end
-            -- feed ev in all slots to state machine
+            -- route stylus events before gesture detection
             self:routeStylusEvents()
+            -- feed ev in all slots to state machine
             local touch_gestures = self.gesture_detector:feedEvent(self.MTSlots)
             self:newFrame()
             local ges_evs = {}
@@ -1262,8 +1268,9 @@ function Input:handleTouchEvLegacy(ev)
                 self:setMtSlot(MTSlot.slot, "timev", time.timeval(ev.time))
             end
 
-            -- feed ev in all slots to state machine
+            -- route stylus events before gesture detection
             self:routeStylusEvents()
+            -- feed ev in all slots to state machine
             local touch_gestures = self.gesture_detector:feedEvent(self.MTSlots)
             self:newFrame()
             local ges_evs = {}
