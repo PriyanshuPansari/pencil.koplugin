@@ -377,9 +377,12 @@ function Pencil:handleStylusSlot(input, slot)
             local x, y = self:transformCoordinates(raw_x, raw_y)
             local page = self:getCurrentPage()
             local deleted = self:eraseAtPoint(x, y, page)
-            if deleted then
-                for _, stroke in ipairs(deleted) do
-                    table.insert(self.eraser_button_deleted, stroke)
+            local hl_deleted = self:eraseHighlightsAtPoint(x, y)
+            if deleted or hl_deleted then
+                if deleted then
+                    for _, stroke in ipairs(deleted) do
+                        table.insert(self.eraser_button_deleted, stroke)
+                    end
                 end
                 self.view:paintTo(Screen.bb, 0, 0)
                 self:paintTo(Screen.bb, 0, 0)
@@ -447,9 +450,12 @@ function Pencil:handleStylusSlot(input, slot)
                         x, y, tostring(page), tostring(self.erasing)))
                 end
                 local deleted = self:eraseAtPoint(x, y, page)
-                if deleted then
-                    for _, stroke in ipairs(deleted) do
-                        table.insert(self.eraser_deleted, stroke)
+                local hl_deleted = self:eraseHighlightsAtPoint(x, y)
+                if deleted or hl_deleted then
+                    if deleted then
+                        for _, stroke in ipairs(deleted) do
+                            table.insert(self.eraser_deleted, stroke)
+                        end
                     end
                     -- Immediately repaint view and our strokes overlay, then refresh
                     self.view:paintTo(Screen.bb, 0, 0)
@@ -2001,13 +2007,16 @@ function Pencil:onDrawTap(ges)
         -- Eraser: delete strokes near tap point
         logger.info("Pencil: eraser tap at", ges.pos.x, ges.pos.y, "page =", page)
         local erased = self:eraseAtPoint(ges.pos.x, ges.pos.y, page)
+        local hl_erased = self:eraseHighlightsAtPoint(ges.pos.x, ges.pos.y)
         if erased then
             logger.info("Pencil: erased", #erased, "strokes")
             table.insert(self.undo_stack, { type = "delete", strokes = erased })
             self:saveStrokes()
+        end
+        if erased or hl_erased then
             UIManager:setDirty(self.view, "ui")
         else
-            logger.info("Pencil: eraser tap found no strokes to erase")
+            logger.info("Pencil: eraser tap found nothing to erase")
         end
         return true
     end
@@ -2084,9 +2093,12 @@ function Pencil:onDrawPan(ges)
         end
 
         local deleted = self:eraseAtPoint(ges.pos.x, ges.pos.y, page)
-        if deleted then
-            for _, stroke in ipairs(deleted) do
-                table.insert(self.eraser_deleted, stroke)
+        local hl_deleted = self:eraseHighlightsAtPoint(ges.pos.x, ges.pos.y)
+        if deleted or hl_deleted then
+            if deleted then
+                for _, stroke in ipairs(deleted) do
+                    table.insert(self.eraser_deleted, stroke)
+                end
             end
             self.view:paintTo(Screen.bb, 0, 0)
             Screen:refreshUI()
@@ -2584,6 +2596,44 @@ end
 -- Check if a point is near a stroke (for eraser)
 function Pencil:isPointNearStroke(px, py, stroke, threshold)
     return PencilGeometry.isPointNearStroke(px, py, stroke, threshold)
+end
+
+-- Erase KOReader text highlights at a given screen point.
+-- Checks visible_boxes (page-space rects) for overlap, deletes matching annotations.
+-- Returns true if any highlight was deleted.
+function Pencil:eraseHighlightsAtPoint(x, y)
+    if not self.view or not self.ui.highlight then return false end
+    local visible_boxes = self.view.highlight and self.view.highlight.visible_boxes
+    if not visible_boxes or #visible_boxes == 0 then return false end
+
+    -- Convert screen point to page space
+    local page_pos = self.view:screenToPageTransform({x = x, y = y})
+    if not page_pos then return false end
+
+    local eraser_r = math.floor(self.tool_settings[TOOL_ERASER].width / 2)
+    local deleted_indices = {}
+    local seen = {}
+
+    for _, box in ipairs(visible_boxes) do
+        local r = box.rect
+        -- Expand rect by eraser radius for tolerance
+        if page_pos.x >= r.x - eraser_r and page_pos.x <= r.x + r.w + eraser_r
+        and page_pos.y >= r.y - eraser_r and page_pos.y <= r.y + r.h + eraser_r then
+            if not seen[box.index] then
+                seen[box.index] = true
+                table.insert(deleted_indices, box.index)
+            end
+        end
+    end
+
+    if #deleted_indices == 0 then return false end
+
+    -- Delete in reverse order so earlier indices stay valid
+    table.sort(deleted_indices, function(a, b) return a > b end)
+    for _, idx in ipairs(deleted_indices) do
+        self.ui.highlight:deleteHighlight(idx)
+    end
+    return true
 end
 
 -- Erase strokes at a given point
