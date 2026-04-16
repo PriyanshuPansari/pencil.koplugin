@@ -979,7 +979,7 @@ end
 -- Handle stylus button press (down event)
 -- Side button behavior:
 --   - Hold + drag = temporarily highlight, then return to original tool
---   - Quick press (no drawing while held) = toggle between pen and eraser
+--   - Quick press (no drawing while held) = cycle tool: pen -> highlighter -> eraser -> pen
 function Pencil:onStylusButtonPress()
     if not self:isEnabled() or self:isOverlayActive() then return false end
 
@@ -998,10 +998,10 @@ function Pencil:onStylusButtonRelease()
     self.side_button_down = false
 
     -- If the button was NOT used for highlighting (no drawing while held),
-    -- treat it as a quick press to toggle between pen and eraser
+    -- treat it as a quick press to cycle through tools: pen -> highlighter -> eraser -> pen
     if was_down and not self.side_button_used_for_highlight then
-        logger.dbg("Pencil: side button quick press - toggling pen/eraser")
-        self:togglePenEraser()
+        logger.dbg("Pencil: side button quick press - cycling tool")
+        self:cycleTool()
     else
         -- Was used for highlighting - show brief feedback that we're back to normal
         logger.dbg("Pencil: highlight complete, back to", self.current_tool)
@@ -1011,19 +1011,21 @@ function Pencil:onStylusButtonRelease()
     return true
 end
 
--- Toggle between pen and eraser
-function Pencil:togglePenEraser()
+-- Cycle through tools: pen -> highlighter -> eraser -> pen
+function Pencil:cycleTool()
     local old_tool = self.current_tool
     local new_tool
-    if self.current_tool == TOOL_ERASER then
-        new_tool = TOOL_PEN
-    else
+    if self.current_tool == TOOL_PEN then
+        new_tool = TOOL_HIGHLIGHTER
+    elseif self.current_tool == TOOL_HIGHLIGHTER then
         new_tool = TOOL_ERASER
+    else
+        new_tool = TOOL_PEN
     end
 
     self.current_tool = new_tool
     self:saveSettings()
-    logger.dbg("Pencil: toggled from", old_tool, "to", new_tool)
+    logger.dbg("Pencil: cycled from", old_tool, "to", new_tool)
 
     -- Show brief visual feedback
     UIManager:show(InfoMessage:new{
