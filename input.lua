@@ -28,6 +28,8 @@ local KEY_RELEASE = 0
 local TOOL_TYPE_FINGER = 0
 local TOOL_TYPE_PEN    = 1
 local TOOL_TYPE_ERASER = 2
+local TOOL_TYPE_HIGHLIGHTER = 3
+local PENCIL_INPUT_DEBUG_LOG = "pencil_input_debug.log"
 
 -- For debug logging of ev.type
 local linux_evdev_type_map = {
@@ -313,6 +315,64 @@ function Input:UIManagerReady(uimgr)
     UIManager = uimgr
 end
 
+function Input:isPencilInputDebugEnabled()
+    if not G_reader_settings then
+        return false
+    end
+
+    local settings = G_reader_settings:readSetting("pencil_annotation_settings") or {}
+    return settings.input_debug_mode == true
+end
+
+function Input:getPencilInputDebugLogPath()
+    if not self._pencil_input_debug_log_path then
+        self._pencil_input_debug_log_path = DataStorage:getDataDir() .. "/" .. PENCIL_INPUT_DEBUG_LOG
+    end
+    return self._pencil_input_debug_log_path
+end
+
+function Input:writePencilInputDebugLog(msg)
+    if not self:isPencilInputDebugEnabled() then
+        return
+    end
+
+    local log_path = self:getPencilInputDebugLogPath()
+    local f = io.open(log_path, "a")
+    if f then
+        f:write(string.format("[%s] %s\n", os.date("%H:%M:%S"), msg))
+        f:close()
+    end
+end
+
+function Input:logRawInputEvent(ev, location)
+    local code_name
+    if ev.type == C.EV_KEY then
+        code_name = self.event_map and self.event_map[ev.code] or linux_evdev_key_code_map[ev.code]
+    elseif ev.type == C.EV_SYN then
+        code_name = linux_evdev_syn_code_map[ev.code]
+    elseif ev.type == C.EV_ABS then
+        code_name = linux_evdev_abs_code_map[ev.code]
+    elseif ev.type == C.EV_MSC then
+        code_name = linux_evdev_msc_code_map[ev.code]
+    elseif ev.type == C.EV_REP then
+        code_name = linux_evdev_rep_code_map[ev.code]
+    end
+
+    self:writePencilInputDebugLog(string.format(
+        "RAW %s: type=%d(%s) code=%d(%s) value=%s mapped=%s cur_slot=%s pen_slot=%s eraser=%s highlighter=%s time=%d.%06d",
+        location or "handleKeyBoardEv",
+        ev.type, linux_evdev_type_map[ev.type] or "?",
+        ev.code, tostring(code_name or "?"),
+        tostring(ev.value),
+        tostring(self.event_map and self.event_map[ev.code] or nil),
+        tostring(self.cur_slot),
+        tostring(self.pen_slot),
+        tostring(self.kobo_eraser_active),
+        tostring(self.kobo_highlighter_active),
+        ev.time.sec, ev.time.usec
+    ))
+end
+
 --[[--
 Setup a rotation_map that does nothing (for platforms where the events we get are already translated).
 --]]
@@ -481,24 +541,39 @@ function Input:routeStylusEvents()
     local dominated_indices = {}
 
     for i, slot in ipairs(self.MTSlots) do
+        -- Barrel button detection: on Kobo Monza the pen barrel button sends TOOL_TYPE_FINGER
+        -- (type 0) + touch instead of BTN_STYLUS2. Reclassify as TOOL_TYPE_HIGHLIGHTER so the
+        -- stylus callback can handle it, but only while the pen is known to be in proximity.
+        if slot.tool == TOOL_TYPE_FINGER and self.pen_in_proximity then
+            slot.tool = TOOL_TYPE_HIGHLIGHTER
+        end
+
         -- Identify stylus by tool type OR pen slot (pen tip or eraser end)
         -- On Kobo, ABS_MT_TOOL_TYPE is sent: 0=finger, 1=stylus
         local is_stylus = (slot.tool == TOOL_TYPE_PEN) or
                           (slot.tool == TOOL_TYPE_ERASER) or
+                          (slot.tool == TOOL_TYPE_HIGHLIGHTER) or
                           (self.pen_slot and slot.slot == self.pen_slot)
 
         if is_stylus then
             -- On Kobo, eraser END still reports tool=1 (PEN) via ABS_MT_TOOL_TYPE,
-            -- but also sends BTN_STYLUS. Override to ERASER when that's active.
+            -- and the side button sends BTN_STYLUS2. Override the tool when these
+            -- Kobo-specific states are active so plugins can react reliably.
             -- Only do this for tool=PEN to avoid affecting fingers (tool=0)
             -- Based on eraser detection pattern from eraser.koplugin by SimonLiu
-            if self.kobo_eraser_active and slot.tool == TOOL_TYPE_PEN then
-                slot.tool = TOOL_TYPE_ERASER
+            -- Highlighter works the same way, but eraser takes priority.
+            if slot.tool == TOOL_TYPE_PEN then
+                if self.kobo_eraser_active then
+                    slot.tool = TOOL_TYPE_ERASER
+                elseif self.kobo_highlighter_active then
+                    slot.tool = TOOL_TYPE_HIGHLIGHTER
+                end
             end
 
             logger.dbg("Input:routeStylusEvents: stylus detected in slot", slot.slot,
                        "tool=", slot.tool, "id=", slot.id, "x=", slot.x, "y=", slot.y,
-                       "pen_slot=", self.pen_slot, "kobo_eraser=", self.kobo_eraser_active)
+                       "pen_slot=", self.pen_slot, "kobo_eraser=", self.kobo_eraser_active,
+                       "kobo_highlighter=", self.kobo_highlighter_active)
             local dominated = self.stylus_callback(self, slot)
             if dominated then
                 table.insert(dominated_indices, i)
@@ -742,6 +817,13 @@ function Input:handleKeyBoardEv(ev)
     -- We just track the state here; routeStylusEvents will use it
     if ev.code == C.BTN_STYLUS then
         self.kobo_eraser_active = (ev.value == 1)
+    end
+
+    -- Track side button state via BTN_STYLUS2 (code 332) on Kobo.
+    -- When the side button is pressed as the stylus touches the screen, Kobo sends
+    -- BTN_STYLUS2. routeStylusEvents will expose that as a distinct tool type.
+    if ev.code == C.BTN_STYLUS2 then
+        self.kobo_highlighter_active = (ev.value == 1)
     end
 
     -- Handle stylus tool type for all protocols (pen tip vs eraser end)
@@ -1027,9 +1109,18 @@ function Input:handleTouchEv(ev)
             self:setupSlotData(ev.value)
         elseif ev.code == C.ABS_MT_TRACKING_ID then
             self:setCurrentMtSlotChecked("id", ev.value)
+            -- Track pen leaving proximity for barrel button detection
+            if ev.value == -1 and self.cur_slot == self.pen_slot then
+                self.pen_in_proximity = false
+            end
         elseif ev.code == C.ABS_MT_TOOL_TYPE then
             -- NOTE: On the Elipsa: Finger == 0; Pen == 1
             self:setCurrentMtSlot("tool", ev.value)
+            -- Track pen entering proximity for barrel button detection
+            -- (Kobo Monza sends TOOL_TYPE_FINGER + touch instead of BTN_STYLUS2 when barrel button pressed)
+            if ev.value == TOOL_TYPE_PEN and self.cur_slot == self.pen_slot then
+                self.pen_in_proximity = true
+            end
         elseif ev.code == C.ABS_MT_POSITION_X or ev.code == C.ABS_X then
             self:setCurrentMtSlotChecked("x", ev.value)
         elseif ev.code == C.ABS_MT_POSITION_Y or ev.code == C.ABS_Y then
@@ -1613,6 +1704,7 @@ function Input:waitEvent(now, deadline)
         local handled = {}
         -- We're guaranteed that ev is an array of event tables. Might be an array of *one* event, but an array nonetheless ;).
         for __, event in ipairs(ev) do
+            self:logRawInputEvent(event, "waitEvent")
             if DEBUG.is_on then
                 -- NOTE: This is rather spammy and computationally intensive,
                 --       and we can't conditionally prevent evaluation of function arguments,
