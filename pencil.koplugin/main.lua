@@ -120,8 +120,8 @@ function Pencil:init()
     self.strokes_loaded = false  -- Set true after successful loadStrokes
     self.undo_stack = {}
 
-    -- Initialize highlighter color (yellow)
-    self.tool_settings[TOOL_HIGHLIGHTER].color = Blitbuffer.Color8(0xDD)  -- Light gray for e-ink
+    -- Initialize highlighter color (yellow for color e-ink display)
+    self.tool_settings[TOOL_HIGHLIGHTER].color = Blitbuffer.ColorRGB32(0xFF, 0xFF, 0x00, 0xFF)
 
     -- Calculate gray value from highlight_lighten_factor setting
     local lighten_factor = G_reader_settings:readSetting("highlight_lighten_factor") or 0.2
@@ -196,6 +196,12 @@ function Pencil:init()
         title = _("Pencil: select eraser"),
         reader = true,
     })
+    Dispatcher:registerAction("pencil_select_highlighter", {
+        category = "none",
+        event = "PencilSelectHighlighter",
+        title = _("Pencil: select highlighter"),
+        reader = true,
+    })
     Dispatcher:registerAction("pencil_undo", {
         category = "none",
         event = "PencilUndo",
@@ -254,6 +260,16 @@ function Pencil:onPencilSelectEraser()
     self.current_tool = TOOL_ERASER
     UIManager:show(InfoMessage:new{
         text = _("Eraser selected"),
+        timeout = 1,
+    })
+    return true
+end
+
+function Pencil:onPencilSelectHighlighter()
+    self.current_tool = TOOL_HIGHLIGHTER
+    self:saveSettings()
+    UIManager:show(InfoMessage:new{
+        text = _("Highlighter selected"),
         timeout = 1,
     })
     return true
@@ -805,6 +821,15 @@ function Pencil:addToMainMenu(menu_items)
                         end,
                     },
                     {
+                        text = _("Highlighter"),
+                        checked_func = function()
+                            return self.current_tool == TOOL_HIGHLIGHTER
+                        end,
+                        callback = function()
+                            self:setTool(TOOL_HIGHLIGHTER)
+                        end,
+                    },
+                    {
                         text = _("Eraser"),
                         checked_func = function()
                             return self.current_tool == TOOL_ERASER
@@ -1036,6 +1061,7 @@ end
 
 -- Handle stylus button and tool events
 function Pencil:onKeyPress(key)
+    if not key then return false end
     local key_str = tostring(key)
 
     -- Always log key events when debug mode is on (even if not enabled)
@@ -1086,6 +1112,7 @@ function Pencil:onKeyPress(key)
 end
 
 function Pencil:onKeyRelease(key)
+    if not key then return false end
     local key_str = tostring(key)
 
     -- Always log key events when debug mode is on (even if not enabled)
@@ -2419,8 +2446,7 @@ function Pencil:drawHighlighterSegment(bb, x1, y1, x2, y2, width, color)
     local dy = y2 - y1
     local dist = math.sqrt(dx * dx + dy * dy)
 
-    -- Highlighter is drawn as a lighter gray to simulate transparency on e-ink
-    local highlight_color = color or Blitbuffer.Color8(0xDD)
+    local highlight_color = color or Blitbuffer.ColorRGB32(0xFF, 0xFF, 0x00, 0xFF)
 
     if dist < 1 then
         local half_w = math.floor(width / 2)
@@ -2524,8 +2550,7 @@ function Pencil:renderStroke(bb, stroke)
     -- Highlighter uses lighter color
     local is_highlighter = (tool == TOOL_HIGHLIGHTER)
     if is_highlighter then
-        -- For highlighter, use stored color or default gray
-        color = stroke.color or Blitbuffer.Color8(0xDD)
+        color = stroke.color or Blitbuffer.ColorRGB32(0xFF, 0xFF, 0x00, 0xFF)
     end
 
     if #stroke.points == 1 then
