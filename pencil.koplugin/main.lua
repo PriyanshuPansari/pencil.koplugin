@@ -62,6 +62,7 @@ local Pencil = InputContainer:extend{
     stylus_callback_registered = false,
     pen_down = false,
     erasing = false,  -- Track if currently in erase mode (for finger modifier)
+    highlight_mode_active = false,  -- True when stylus is doing text selection (highlighter tool)
     pen_x = 0,
     pen_y = 0,
 
@@ -459,40 +460,50 @@ function Pencil:handleStylusSlot(input, slot)
         return true  -- Dominate: remove from gesture detection
     end
 
+    -- Determine effective tool (eraser already handled above)
+    local effective_tool = (self.side_button_down) and TOOL_HIGHLIGHTER or self.current_tool
+
     -- Handle pen/highlighter mode
     if slot.id and slot.id >= 0 then
         -- Pen down or moving
         if not self.pen_down then
-            -- Check if color picker is showing - route pen tap to it
-            if self.color_picker_showing and self.color_picker_widget then
-                local raw_x = slot.x or 0
-                local raw_y = slot.y or 0
-                local x, y = self:transformCoordinates(raw_x, raw_y)
-                if self.color_picker_widget:handlePenTap(x, y) then
-                    -- Color picker handled the tap, don't start a stroke
-                    return true
-                end
-            end
-
-            -- Start new stroke
-            self.pen_down = true
-            self.erasing = false
-            self:cancelPendingRefresh()
-            self:cancelColorPickerTimer()
-            self:startRawStroke()
-            -- Record initial position and timestamp for color picker trigger
             local raw_x = slot.x or 0
             local raw_y = slot.y or 0
             local x, y = self:transformCoordinates(raw_x, raw_y)
+            self.pen_down = true
+            self.erasing = false
             self.pen_x = x
             self.pen_y = y
-            self.color_picker_start_x = x
-            self.color_picker_start_y = y
-            self.color_picker_start_time = time.now()
-            -- Schedule periodic check for color picker trigger
-            self:scheduleColorPickerCheck()
-            if self.input_debug_mode then
-                self:writeDebugLog("=== PEN DOWN ===")
+
+            if effective_tool == TOOL_HIGHLIGHTER then
+                -- Text highlight mode: route to KOReader's highlight system
+                self.highlight_mode_active = true
+                if self.input_debug_mode then
+                    self:writeDebugLog("=== HIGHLIGHT DOWN ===")
+                end
+                if self.ui.highlight then
+                    self.ui.highlight:onHold(nil, {pos = Geom:new{x=x, y=y, w=0, h=0}})
+                end
+            else
+                -- Drawing mode
+                self.highlight_mode_active = false
+                -- Check if color picker is showing - route pen tap to it
+                if self.color_picker_showing and self.color_picker_widget then
+                    if self.color_picker_widget:handlePenTap(x, y) then
+                        self.pen_down = false
+                        return true
+                    end
+                end
+                self:cancelPendingRefresh()
+                self:cancelColorPickerTimer()
+                self:startRawStroke()
+                self.color_picker_start_x = x
+                self.color_picker_start_y = y
+                self.color_picker_start_time = time.now()
+                self:scheduleColorPickerCheck()
+                if self.input_debug_mode then
+                    self:writeDebugLog("=== PEN DOWN ===")
+                end
             end
         else
             -- Pen is moving
@@ -500,16 +511,21 @@ function Pencil:handleStylusSlot(input, slot)
             local raw_y = slot.y or self.pen_y
             local x, y = self:transformCoordinates(raw_x, raw_y)
             if x ~= self.pen_x or y ~= self.pen_y then
-                -- Check if pen moved more than tolerance from start position
-                if self.color_picker_start_x and self.color_picker_start_y then
-                    local dx = math.abs(x - self.color_picker_start_x)
-                    local dy = math.abs(y - self.color_picker_start_y)
-                    if dx > COLOR_PICKER_TOLERANCE_PIXELS or dy > COLOR_PICKER_TOLERANCE_PIXELS then
-                        -- Pen moved too far - reset tracking (no color picker)
-                        self:resetColorPickerTracking()
+                if self.highlight_mode_active then
+                    if self.ui.highlight then
+                        self.ui.highlight:onHoldPan(nil, {pos = Geom:new{x=x, y=y, w=0, h=0}})
                     end
+                else
+                    -- Check if pen moved more than tolerance from start position
+                    if self.color_picker_start_x and self.color_picker_start_y then
+                        local dx = math.abs(x - self.color_picker_start_x)
+                        local dy = math.abs(y - self.color_picker_start_y)
+                        if dx > COLOR_PICKER_TOLERANCE_PIXELS or dy > COLOR_PICKER_TOLERANCE_PIXELS then
+                            self:resetColorPickerTracking()
+                        end
+                    end
+                    self:addRawPoint(x, y)
                 end
-                self:addRawPoint(x, y)
                 self.pen_x = x
                 self.pen_y = y
             end
@@ -518,10 +534,21 @@ function Pencil:handleStylusSlot(input, slot)
         -- Pen lifted (id == -1)
         if self.pen_down and not self.erasing then
             self.pen_down = false
-            self:cancelColorPickerTimer()
-            self:endRawStroke()
-            if self.input_debug_mode then
-                self:writeDebugLog("=== PEN UP ===")
+            if self.highlight_mode_active then
+                self.highlight_mode_active = false
+                if self.input_debug_mode then
+                    self:writeDebugLog("=== HIGHLIGHT UP ===")
+                end
+                if self.ui.highlight and self.ui.highlight.selected_text then
+                    self.ui.highlight:saveHighlight(true)
+                    self.ui.highlight:clear()
+                end
+            else
+                self:cancelColorPickerTimer()
+                self:endRawStroke()
+                if self.input_debug_mode then
+                    self:writeDebugLog("=== PEN UP ===")
+                end
             end
         end
     end
